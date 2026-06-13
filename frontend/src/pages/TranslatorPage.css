@@ -77,27 +77,46 @@ body { background: #080c14; }
 /* ── MAIN GRID ── */
 .main-grid {
   display: grid;
-  grid-template-columns: 1fr 420px 380px;
+  grid-template-columns: 32% 33% 35%;
   gap: 0;
-  flex: 1;
+
   height: calc(100vh - 65px);
   overflow: hidden;
+
+  justify-content: center;
+  align-items: stretch;
 }
+
 
 /* ── CAMERA COLUMN ── */
 .cam-col {
   border-right: 1px solid rgba(255,255,255,0.06);
-  display: flex; flex-direction: column;
+
+  display: flex;
+  flex-direction: column;
+
+  height: 100%;
+  min-height: 0;
+
   overflow: hidden;
 }
+/* Camera feed */
 .cam-feed-wrap {
   position: relative;
+
   flex: 1;
+
+  min-height: 0;
+
   background: #0d1117;
+
   overflow: hidden;
 }
+
 .cam-feed-wrap img {
-  width: 100%; height: 100%; object-fit: cover;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 .cam-grid-placeholder {
   width: 100%; height: 100%;
@@ -161,12 +180,22 @@ body { background: #080c14; }
 /* ── RECOGNITION COLUMN ── */
 .rec-col {
   border-right: 1px solid rgba(255,255,255,0.06);
-  display: flex; flex-direction: column;
-  overflow-y: auto; overflow-x: hidden;
+
+  display: flex;
+  flex-direction: column;
+
+  height: 100%;
+  min-height: 0;
+
+  overflow-y: auto;
+  overflow-x: hidden;
+
   padding: 20px;
   gap: 16px;
+
   background: #090d18;
 }
+
 .rec-col::-webkit-scrollbar { width: 4px; }
 .rec-col::-webkit-scrollbar-thumb { background: rgba(52,211,153,0.2); border-radius: 4px; }
 
@@ -294,7 +323,12 @@ body { background: #080c14; }
 
 /* ── CHAT COLUMN ── */
 .chat-col {
-  display: flex; flex-direction: column;
+  display: flex;
+  flex-direction: column;
+
+  height: 100%;
+  min-height: 0;
+
   background: #060a12;
 }
 .chat-header {
@@ -316,8 +350,15 @@ body { background: #080c14; }
   color: #4b5563; letter-spacing: 1px;
 }
 .chat-messages {
-  flex: 1; overflow-y: auto; padding: 20px;
-  display: flex; flex-direction: column; gap: 14px;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+
+  padding: 20px;
+
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
 }
 .chat-messages::-webkit-scrollbar { width: 4px; }
 .chat-messages::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 4px; }

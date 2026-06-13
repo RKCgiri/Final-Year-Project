@@ -10,47 +10,38 @@ fontLink.href = "https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;70
 fontLink.rel = "stylesheet";
 document.head.appendChild(fontLink);
 
-
 // ─── Utility ───────────────────────────────────────────────────────────────
 function now() {
   return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
-// ─── Request Batcher & Throttler ───────────────────────────────────────────
-class RequestOptimizer {
-  constructor() {
-    this.lastRequestTime = {};
-    this.requestCache = {};
-    this.cacheTTL = 50; // milliseconds
-  }
-
-  async throttledFetch(key, fn, delay = 100) {
-    const now = Date.now();
-    const lastTime = this.lastRequestTime[key] || 0;
-    
-    if (now - lastTime < delay) return this.requestCache[key];
-    
-    try {
-      const result = await fn();
-      this.lastRequestTime[key] = now;
-      this.requestCache[key] = result;
-      return result;
-    } catch (e) {
-      throw e;
-    }
-  }
-
-  clearCache(key) {
-    delete this.requestCache[key];
-    delete this.lastRequestTime[key];
-  }
+// ─── Debounce helper ───────────────────────────────────────────────────────
+function useDebounce(value, delay) {
+  const [debouncedValue, setDebouncedValue] = useState(value);
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedValue(value), delay);
+    return () => clearTimeout(timer);
+  }, [value, delay]);
+  return debouncedValue;
 }
 
-const requestOptimizer = new RequestOptimizer();
+// ─── Language list ─────────────────────────────────────────────────────────
+const LANGUAGES = [
+  { value: "english", label: "English (no translation)" },
+  { value: "hindi",   label: "Hindi" },
+  { value: "bengali", label: "Bengali" },
+  { value: "tamil",   label: "Tamil" },
+  { value: "telugu",  label: "Telugu" },
+  { value: "marathi", label: "Marathi" },
+  { value: "gujarati",label: "Gujarati" },
+  { value: "punjabi", label: "Punjabi" },
+  { value: "french",  label: "French" },
+  { value: "spanish", label: "Spanish" },
+  { value: "arabic",  label: "Arabic" },
+];
 
 // ─── Main Component ─────────────────────────────────────────────────────────
 export default function TranslatorPage() {
-  // State management - OPTIMIZED: reduced number of state updates
   const [appState, setAppState] = useState({
     cameraActive: false,
     cameraFrame: null,
@@ -66,16 +57,23 @@ export default function TranslatorPage() {
   });
 
   const [connectionStatus, setConnectionStatus] = useState("connecting");
-  // Local manual edits (don't sync to backend)
+
   const [manualEdits, setManualEdits] = useState({
     localWord: "",
     localSentence: "",
   });
+
   const frameIntervalRef = useRef(null);
   const recIntervalRef = useRef(null);
   const chatEndRef = useRef(null);
   const retryCountRef = useRef(0);
   const maxRetriesRef = useRef(3);
+
+  // ── FIX (Suggestion Bug): activeWord always picks the best available word.
+  //    Manual input overrides gesture word.  We track the PREVIOUS value so
+  //    the suggestion effect re-fires whenever the gesture word grows a letter.
+  const activeWord = manualEdits.localWord !== "" ? manualEdits.localWord : appState.currentWord;
+  const debouncedActiveWord = useDebounce(activeWord, 250);
 
   // ── Scroll chat to bottom ──
   useEffect(() => {
@@ -93,27 +91,56 @@ export default function TranslatorPage() {
     return () => { stopCamera(); };
   }, []);
 
-  // ── Optimized: Combined fetch for state and frame ──
+  // ── FIX (Suggestion Bug): Fetch suggestions whenever activeWord changes.
+  //    Removed the early-return that was blocking gesture-word suggestions.
+  //    Now fires for BOTH manual typing and gesture-built words.
+  useEffect(() => {
+    const word = debouncedActiveWord?.trim();
+    if (!word) {
+      updateAppState({ suggestions: [] });
+      return;
+    }
+
+    const fetchSuggestions = async () => {
+      try {
+        const res = await fetch(
+          `${API_BASE_URL}/recognition/suggestions?word=${encodeURIComponent(word)}`
+        );
+        const data = await res.json();
+        if (data.status === "success") {
+          updateAppState({ suggestions: data.suggestions || [] });
+        }
+      } catch (e) {
+        console.error("Suggestion fetch error:", e);
+      }
+    };
+
+    fetchSuggestions();
+  }, [debouncedActiveWord, updateAppState]);
+
+  // ── Fetch recognition state from backend ──
   const fetchRecognitionData = useCallback(async () => {
     if (!appState.cameraActive) return;
 
     try {
       const response = await fetch(`${API_BASE_URL}/recognition/state`);
       const data = await response.json();
-      
+
       if (data.status === "success") {
-        const { current_symbol, word, sentence, suggestions } = data.data;
-        
-        // Batch update state to reduce renders
+        const { current_symbol, word, sentence } = data.data;
+
+        // FIX: never overwrite suggestions from the backend poll —
+        // the dedicated suggestion effect owns that state.
         updateAppState({
           currentSymbol: current_symbol || "—",
           currentWord: word || "",
           currentSentence: sentence || "",
-          suggestions: suggestions || [],
           error: "",
-          cameraFrame: data.frame ? `data:image/jpeg;base64,${data.frame}` : appState.cameraFrame,
+          cameraFrame: data.frame
+            ? `data:image/jpeg;base64,${data.frame}`
+            : appState.cameraFrame,
         });
-        
+
         retryCountRef.current = 0;
         setConnectionStatus("connected");
       }
@@ -122,19 +149,14 @@ export default function TranslatorPage() {
     }
   }, [appState.cameraActive, appState.cameraFrame, updateAppState]);
 
-  // ── Optimized: Only fetch frame when not in state request ──
+  // ── Fetch camera frame only ──
   const fetchFrameOnly = useCallback(async () => {
     if (!appState.cameraActive) return;
-
     try {
       const response = await fetch(`${API_BASE_URL}/camera/frame`);
       const data = await response.json();
-      
       if (data.status === "success") {
-        updateAppState({
-          cameraFrame: `data:image/jpeg;base64,${data.frame}`,
-          error: ""
-        });
+        updateAppState({ cameraFrame: `data:image/jpeg;base64,${data.frame}`, error: "" });
       }
     } catch (e) {
       console.error("Frame fetch error:", e);
@@ -144,7 +166,6 @@ export default function TranslatorPage() {
   // ── Error handling with retry logic ──
   const handleError = useCallback((err) => {
     retryCountRef.current += 1;
-    
     if (retryCountRef.current <= maxRetriesRef.current) {
       setConnectionStatus("reconnecting");
       updateAppState({ error: "Retrying..." });
@@ -154,19 +175,12 @@ export default function TranslatorPage() {
     }
   }, [updateAppState]);
 
-  // ── Adaptive polling based on changes ──
+  // ── Adaptive polling ──
   useEffect(() => {
     if (!appState.cameraActive) return;
 
-    // Fetch state + frame combined (main request)
-    const stateInterval = setInterval(() => {
-      requestOptimizer.throttledFetch("state", fetchRecognitionData, 100);
-    }, 100);
-
-    // Secondary frame-only fetch (optional, for better FPS if needed)
-    const frameInterval = setInterval(() => {
-      requestOptimizer.throttledFetch("frame", fetchFrameOnly, 150);
-    }, 150);
+    const stateInterval = setInterval(fetchRecognitionData, 150);
+    const frameInterval = setInterval(fetchFrameOnly, 200);
 
     return () => {
       clearInterval(stateInterval);
@@ -198,8 +212,12 @@ export default function TranslatorPage() {
     updateAppState({ cameraActive: false, cameraFrame: null });
   }, [updateAppState]);
 
-  // ── Delete actions (memoized) ──
+  // ── Delete actions ──
   const deleteCurrentLetter = useCallback(async () => {
+    if (manualEdits.localWord.length > 0) {
+      setManualEdits(prev => ({ ...prev, localWord: prev.localWord.slice(0, -1) }));
+      return;
+    }
     try {
       const res = await fetch(`${API_BASE_URL}/recognition/delete-letter`, { method: "POST" });
       const d = await res.json();
@@ -208,19 +226,17 @@ export default function TranslatorPage() {
           currentWord: d.data.word ?? "",
           currentSentence: d.data.sentence ?? "",
           currentSymbol: "—",
-          suggestions: d.data.suggestions ?? [],
         });
-      } else {
-        throw new Error(d.message);
       }
     } catch (err) {
       if (appState.currentWord.length > 0) {
         updateAppState({ currentWord: appState.currentWord.slice(0, -1) });
       }
     }
-  }, [appState.currentWord, updateAppState]);
+  }, [manualEdits.localWord, appState.currentWord, updateAppState]);
 
   const deleteCurrentWord = useCallback(async () => {
+    setManualEdits(prev => ({ ...prev, localWord: "" }));
     try {
       const res = await fetch(`${API_BASE_URL}/recognition/clear-word`, { method: "POST" });
       const d = await res.json();
@@ -229,21 +245,21 @@ export default function TranslatorPage() {
           currentWord: d.data.word ?? "",
           currentSentence: d.data.sentence ?? "",
           currentSymbol: "—",
-          suggestions: d.data.suggestions ?? [],
+          suggestions: [],
         });
-      } else {
-        throw new Error(d.message);
       }
-    } catch (err) {
-      updateAppState({
-        currentWord: "",
-        suggestions: [],
-        currentSymbol: "—"
-      });
+    } catch {
+      updateAppState({ currentWord: "", suggestions: [], currentSymbol: "—" });
     }
   }, [updateAppState]);
 
   const deleteLastWordFromSentence = useCallback(async () => {
+    if (manualEdits.localSentence.trim()) {
+      const words = manualEdits.localSentence.trim().split(" ");
+      words.pop();
+      setManualEdits(prev => ({ ...prev, localSentence: words.join(" ") }));
+      return;
+    }
     try {
       const res = await fetch(`${API_BASE_URL}/recognition/clear-sentence-word`, { method: "POST" });
       const d = await res.json();
@@ -254,22 +270,21 @@ export default function TranslatorPage() {
           currentSymbol: "—",
           suggestions: d.data.suggestions ?? [],
         });
-      } else {
-        throw new Error(d.message);
       }
-    } catch (err) {
+    } catch {
       const words = appState.currentSentence.trim().split(" ");
       if (words.length > 0) {
         words.pop();
         updateAppState({ currentSentence: words.join(" ") });
       }
     }
-  }, [appState.currentSentence, updateAppState]);
+  }, [manualEdits.localSentence, appState.currentSentence, updateAppState]);
 
   const clearAll = useCallback(async () => {
     try {
       await fetch(`${API_BASE_URL}/recognition/clear`, { method: "POST" });
     } catch {}
+    setManualEdits({ localWord: "", localSentence: "" });
     updateAppState({
       currentWord: "",
       currentSentence: "",
@@ -278,8 +293,20 @@ export default function TranslatorPage() {
     });
   }, [updateAppState]);
 
-  // ── Accept suggestion (memoized) ──
+  // ── Accept suggestion ──
   const acceptSuggestion = useCallback(async (s) => {
+    const hasManuSentence = manualEdits.localSentence.trim().length > 0;
+
+    if (hasManuSentence) {
+      setManualEdits(prev => ({
+        localWord: "",
+        localSentence: (prev.localSentence.trim() ? prev.localSentence.trim() + " " : "") + s,
+      }));
+      updateAppState({ suggestions: [], currentSymbol: "—" });
+      try { await fetch(`${API_BASE_URL}/recognition/clear-word`, { method: "POST" }); } catch {}
+      return;
+    }
+
     try {
       const res = await fetch(`${API_BASE_URL}/recognition/accept-suggestion`, {
         method: "POST",
@@ -288,6 +315,7 @@ export default function TranslatorPage() {
       });
       const d = await res.json();
       if (d.status === "success") {
+        setManualEdits(prev => ({ ...prev, localWord: "" }));
         updateAppState({
           currentWord: d.data.word ?? "",
           currentSentence: d.data.sentence ?? "",
@@ -297,138 +325,149 @@ export default function TranslatorPage() {
       } else {
         throw new Error("Backend error");
       }
-    } catch (err) {
+    } catch {
+      setManualEdits(prev => ({ ...prev, localWord: "" }));
       updateAppState({
         currentWord: "",
-        currentSentence: (prev) => (prev ? prev + " " : "") + s,
+        currentSentence: (appState.currentSentence ? appState.currentSentence + " " : "") + s,
         currentSymbol: "—",
         suggestions: [],
       });
     }
-  }, [updateAppState]);
+  }, [manualEdits.localSentence, appState.currentSentence, updateAppState]);
 
-  // ── Send sentence to chat (memoized) ──
+  // ── Commit gesture word into sentence ──
+  const commitWordToSentence = useCallback(async () => {
+    const wordToCommit = (manualEdits.localWord || appState.currentWord).trim();
+    if (!wordToCommit) return;
+
+    const newSentence = (manualEdits.localSentence.trim()
+      ? manualEdits.localSentence.trim() + " "
+      : "") + wordToCommit;
+
+    setManualEdits({ localWord: "", localSentence: newSentence });
+    updateAppState({ currentSymbol: "—", suggestions: [] });
+
+    try { await fetch(`${API_BASE_URL}/recognition/clear-word`, { method: "POST" }); } catch {}
+  }, [manualEdits.localWord, manualEdits.localSentence, appState.currentWord, updateAppState]);
+
+  // ── Send sentence to chat with translation ──
   const sendToChatHandler = useCallback(async () => {
-    // Prioritize manual edits, fallback to backend values
-    const text = (manualEdits.localSentence.trim() || manualEdits.localWord.trim() || 
-                  appState.currentSentence.trim() || appState.currentWord.trim()).trim();
+    const text = (
+      manualEdits.localSentence.trim() ||
+      manualEdits.localWord.trim() ||
+      appState.currentSentence.trim() ||
+      appState.currentWord.trim()
+    ).trim();
     if (!text) return;
 
-    // Attempt to translate via OpenAI LLM API
     let translated = text;
-    const llmBaseUrl = import.meta.env.VITE_LLM_API_URL;
-    const llmKey = import.meta.env.VITE_LLM_API_KEY;
+    const lang = appState.targetLanguage;
 
-    if (llmBaseUrl && llmKey) {
-      try {
-        const completionUrl = llmBaseUrl.endsWith('/') ? llmBaseUrl + 'chat/completions' : llmBaseUrl + '/chat/completions';
-        
-        const languageName = appState.targetLanguage === "hindi" ? "Hindi" : 
-                           appState.targetLanguage === "bengali" ? "Bengali" : "English";
-        
-        const resp = await fetch(completionUrl, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${llmKey}`,
-          },
-          body: JSON.stringify({
-            model: "gpt-3.5-turbo",
-            messages: [
-              {
-                role: "system",
-                content: `You are a professional English to ${languageName} translator. Translate the user's text to ${languageName}. Only output the translated text, nothing else.`
-              },
-              {
-                role: "user",
-                content: text
-              }
-            ],
-            temperature: 0.3,
-          }),
-        });
-        const jd = await resp.json();
-        
-        if (jd.choices && jd.choices[0] && jd.choices[0].message) {
-          translated = jd.choices[0].message.content.trim();
-        } else if (jd.error) {
-          console.error("OpenAI API error:", jd.error);
-          updateAppState({ error: `Translation error: ${jd.error.message}` });
+    // FIX: Skip translation when English is selected
+    if (lang !== "english") {
+      const llmBaseUrl = import.meta.env.VITE_LLM_API_URL;
+      const llmKey = import.meta.env.VITE_LLM_API_KEY;
+
+      if (llmBaseUrl && llmKey) {
+        try {
+          const completionUrl = llmBaseUrl.endsWith("/")
+            ? llmBaseUrl + "chat/completions"
+            : llmBaseUrl + "/chat/completions";
+
+          const langLabel = LANGUAGES.find(l => l.value === lang)?.label || lang;
+
+          const resp = await fetch(completionUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: `Bearer ${llmKey}` },
+            body: JSON.stringify({
+              model: "gpt-3.5-turbo",
+              messages: [
+                {
+                  role: "system",
+                  content: `You are a professional English to ${langLabel} translator. Translate the user's text to ${langLabel}. Only output the translated text, nothing else.`,
+                },
+                { role: "user", content: text },
+              ],
+              temperature: 0.3,
+            }),
+          });
+          const jd = await resp.json();
+          if (jd.choices?.[0]?.message) {
+            translated = jd.choices[0].message.content.trim();
+          } else if (jd.error) {
+            console.error("LLM API error:", jd.error);
+            updateAppState({ error: `Translation error: ${jd.error.message}` });
+          }
+        } catch (e) {
+          console.error("LLM translation error:", e);
+          updateAppState({ error: "Translation failed (check API key & internet)" });
         }
-      } catch (e) {
-        console.error("LLM translation error:", e);
-        updateAppState({ error: "Translation failed (check API key & internet)" });
+      } else {
+        updateAppState({ error: "LLM not configured — set VITE_LLM_API_URL and VITE_LLM_API_KEY in .env" });
       }
-    } else {
-      updateAppState({ error: "LLM not configured. Set VITE_LLM_API_URL and VITE_LLM_API_KEY in .env" });
     }
 
-    // Add translated message to chat
+    const langLabel = lang === "english" ? "" : ` [${LANGUAGES.find(l => l.value === lang)?.label}]`;
+
     updateAppState({
-      chatMessages: [...appState.chatMessages, { text: translated, lang: appState.targetLanguage, time: now(), id: Date.now() }],
+      chatMessages: [
+        ...appState.chatMessages,
+        {
+          original: text,
+          text: translated + langLabel,
+          lang,
+          time: now(),
+          id: Date.now(),
+        },
+      ],
       currentSentence: "",
       currentWord: "",
       currentSymbol: "—",
       suggestions: [],
     });
 
-    // Clear manual edits after sending
     setManualEdits({ localWord: "", localSentence: "" });
 
     try {
       await fetch(`${API_BASE_URL}/recognition/send-sentence`, { method: "POST" });
-    } catch (err) {
+    } catch {
       fetch(`${API_BASE_URL}/recognition/clear`, { method: "POST" }).catch(() => {});
     }
-  }, [appState.currentSentence, appState.currentWord, appState.chatMessages, appState.targetLanguage, manualEdits, updateAppState]);
+  }, [
+    appState.currentSentence, appState.currentWord, appState.chatMessages,
+    appState.targetLanguage, manualEdits, updateAppState,
+  ]);
 
-  // ── Play voice (memoized) ──
+  // ── Play voice ──
   const playVoice = useCallback(() => {
-    const text = appState.currentSentence || appState.currentWord;
+    const text = manualEdits.localSentence || appState.currentSentence || manualEdits.localWord || appState.currentWord;
     if (!text) return;
     const u = new SpeechSynthesisUtterance(text);
     u.rate = appState.voiceSpeed / 50;
     u.volume = appState.volume / 100;
+    // FIX: set voice language based on selected target language
+    const langMap = {
+      hindi: "hi-IN", bengali: "bn-IN", tamil: "ta-IN", telugu: "te-IN",
+      marathi: "mr-IN", gujarati: "gu-IN", punjabi: "pa-IN",
+      french: "fr-FR", spanish: "es-ES", arabic: "ar",
+    };
+    if (langMap[appState.targetLanguage]) u.lang = langMap[appState.targetLanguage];
     window.speechSynthesis.speak(u);
-  }, [appState.currentSentence, appState.currentWord, appState.voiceSpeed, appState.volume]);
+  }, [manualEdits, appState.currentSentence, appState.currentWord, appState.voiceSpeed, appState.volume, appState.targetLanguage]);
 
-  // ── Memoized computed values ──
-  const displaySymbol = useMemo(() => 
+  // ── Computed values ──
+  const displaySymbol = useMemo(() =>
     appState.currentSymbol === "blank" ? "␣" : appState.currentSymbol,
     [appState.currentSymbol]
   );
 
-  // Supported regional languages for on-the-fly translation
-  const LANGUAGES = [
-    { value: "hindi", label: "Hindi" },
-    { value: "bengali", label: "Bengali" },
-  ];
-
-  const handleVoiceSpeedChange = useCallback((value) => {
-    updateAppState({ voiceSpeed: +value });
-  }, [updateAppState]);
-
-  const handleVolumeChange = useCallback((value) => {
-    updateAppState({ volume: +value });
-  }, [updateAppState]);
+  const displayWord = manualEdits.localWord !== "" ? manualEdits.localWord : appState.currentWord;
+  const displaySentence = manualEdits.localSentence !== "" ? manualEdits.localSentence : appState.currentSentence;
+  const canCommitWord = (manualEdits.localWord || appState.currentWord).trim().length > 0;
 
   return (
     <div className="app-wrap">
-      {/* Header */}
-      <header className="header">
-        <div className="header-logo">
-          <div className="logo-icon">icon</div>
-          <div>
-            <div className="logo-text">SignBridge</div>
-            <div className="logo-sub">Real-time ASL Recognition</div>
-          </div>
-        </div>
-        <div className="header-status">
-          <div className={`status-dot ${appState.cameraActive ? "live" : ""}`}
-            style={{ background: appState.cameraActive ? "#34d399" : "#4b5563" }} />
-          {appState.cameraActive ? "LIVE" : "OFFLINE"}
-        </div>
-      </header>
 
       {/* Main Grid */}
       <div className="main-grid">
@@ -460,7 +499,7 @@ export default function TranslatorPage() {
           </div>
 
           <div className="cam-controls">
-            <button className="ctrl-btn" onClick={playVoice}>🔊 Speak</button>
+            {/* <button className="ctrl-btn" onClick={playVoice}>🔊 Speak</button> */}
             <button className="ctrl-btn danger" onClick={clearAll}>↺ Reset</button>
             <button
               className={`ctrl-btn ${appState.cameraActive ? "danger" : "primary"}`}
@@ -470,30 +509,11 @@ export default function TranslatorPage() {
               {appState.cameraActive ? "⏹ Stop" : "▶ Start Camera"}
             </button>
           </div>
-
-          {/* Voice controls */}
-          <div style={{ padding: "12px 16px", background: "#0a0e1a", borderTop: "1px solid rgba(255,255,255,0.05)" }}>
-            <div style={{ display: "flex", gap: "20px" }}>
-              <div style={{ flex: 1 }}>
-                <div className="sec-label" style={{ marginBottom: 6 }}>Speed</div>
-                <input type="range" min="10" max="100" value={appState.voiceSpeed}
-                  onChange={e => handleVoiceSpeedChange(+e.target.value)}
-                  style={{ width: "100%", accentColor: "#34d399" }} />
-              </div>
-              <div style={{ flex: 1 }}>
-                <div className="sec-label" style={{ marginBottom: 6 }}>Volume</div>
-                <input type="range" min="0" max="100" value={appState.volume}
-                  onChange={e => handleVolumeChange(+e.target.value)}
-                  style={{ width: "100%", accentColor: "#34d399" }} />
-              </div>
-            </div>
-          </div>
         </div>
 
         {/* ── Column 2: Recognition ── */}
         <div className="rec-col">
 
-          {/* Error */}
           {appState.error && (
             <div className="error-bar">
               <span>⚠</span>
@@ -520,24 +540,49 @@ export default function TranslatorPage() {
 
           {/* Current Word */}
           <div>
-            <div className="sec-label">02 — Current Word {manualEdits.localWord && "(Manual)"}</div>
+            <div className="sec-label">
+              02 — Current Word
+              {manualEdits.localWord && <span style={{ color: "#fbbf24", marginLeft: 6 }}>(Manual)</span>}
+            </div>
             <div className="word-card">
               <input
                 type="text"
-                value={manualEdits.localWord || appState.currentWord}
-                onChange={(e) => setManualEdits({...manualEdits, localWord: e.target.value})}
+                value={displayWord}
+                onChange={(e) => {
+                  setManualEdits(prev => ({ ...prev, localWord: e.target.value }));
+                }}
                 placeholder="Type word or let camera detect..."
-                style={{ width: "100%", background: "#0a0e1a", color: "#34d399", border: "1px solid rgba(52, 211, 153, 0.3)", padding: "8px 10px", borderRadius: "4px", fontSize: "14px" }}
+                style={{
+                  width: "100%", background: "#0a0e1a", color: "#34d399",
+                  border: "1px solid rgba(52, 211, 153, 0.3)", padding: "8px 10px",
+                  borderRadius: "4px", fontSize: "14px",
+                }}
               />
-              <div className="word-footer" style={{ marginTop: "8px" }}>
+              <div className="word-footer" style={{ marginTop: "8px", display: "flex", gap: 8, alignItems: "center" }}>
                 <span className="word-len">
-                  {(manualEdits.localWord || appState.currentWord).length > 0 ? `${(manualEdits.localWord || appState.currentWord).length} letters` : "waiting…"}
+                  {displayWord.length > 0 ? `${displayWord.length} letters` : "waiting…"}
                 </span>
-                <button className="del-btn" style={{ position: "static", width: 28, height: 28 }}
-                  title="Clear current word" onClick={() => {
-                    setManualEdits({...manualEdits, localWord: ""});
-                    deleteCurrentWord();
-                  }}>×</button>
+
+                <button
+                  className="ctrl-btn"
+                  style={{
+                    padding: "4px 10px", fontSize: "11px", marginLeft: "auto",
+                    opacity: canCommitWord ? 1 : 0.4,
+                    cursor: canCommitWord ? "pointer" : "default",
+                  }}
+                  title="Append this word to the sentence"
+                  disabled={!canCommitWord}
+                  onClick={commitWordToSentence}
+                >
+                  Add Word ↓
+                </button>
+
+                <button
+                  className="del-btn"
+                  style={{ position: "static", width: 28, height: 28 }}
+                  title="Clear current word"
+                  onClick={deleteCurrentWord}
+                >×</button>
               </div>
             </div>
           </div>
@@ -546,15 +591,22 @@ export default function TranslatorPage() {
 
           {/* Suggestions */}
           <div>
-            <div className="sec-label">03 — Word Suggestions</div>
+            <div className="sec-label">
+              03 — Word Suggestions
+              {activeWord && <span style={{ color: "#60a5fa", marginLeft: 6, fontSize: 10 }}>
+                for "{activeWord.toLowerCase()}"
+              </span>}
+            </div>
             <div className="sugg-wrap">
               {appState.suggestions.length > 0
-                ? appState.suggestions.slice(0, 5).map((s, i) => (
+                ? appState.suggestions.slice(0, 6).map((s, i) => (
                   <button key={i} className="sugg-btn" onClick={() => acceptSuggestion(s)}>
                     {s}
                   </button>
                 ))
-                : <span className="sugg-no">Type a word to see suggestions</span>
+                : <span className="sugg-no">
+                  {activeWord ? "No completions found" : "Sign or type a word to see suggestions"}
+                </span>
               }
             </div>
           </div>
@@ -563,20 +615,37 @@ export default function TranslatorPage() {
 
           {/* Sentence */}
           <div style={{ flex: 1 }}>
-            <div className="sec-label">04 — Current Sentence {manualEdits.localSentence && "(Manual)"}</div>
+            <div className="sec-label">
+              04 — Current Sentence
+              {manualEdits.localSentence && <span style={{ color: "#fbbf24", marginLeft: 6 }}>(Manual)</span>}
+            </div>
             <div className="sentence-card">
               <textarea
-                value={manualEdits.localSentence || appState.currentSentence}
-                onChange={(e) => setManualEdits({...manualEdits, localSentence: e.target.value})}
-                placeholder="Type sentence or let camera build it..."
-                style={{ width: "100%", background: "#0a0e1a", color: "#34d399", border: "1px solid rgba(52, 211, 153, 0.3)", padding: "8px 10px", borderRadius: "4px", fontSize: "14px", minHeight: "60px", fontFamily: "inherit", resize: "vertical" }}
+                value={displaySentence}
+                onChange={(e) => setManualEdits(prev => ({ ...prev, localSentence: e.target.value }))}
+                placeholder="Type sentence or use 'Add Word ↓' to append gesture words..."
+                style={{
+                  width: "100%", background: "#0a0e1a", color: "#34d399",
+                  border: "1px solid rgba(52, 211, 153, 0.3)", padding: "8px 10px",
+                  borderRadius: "4px", fontSize: "14px", minHeight: "60px",
+                  fontFamily: "inherit", resize: "vertical",
+                }}
               />
               <div className="sentence-footer" style={{ marginTop: "8px" }}>
-                <button className="del-btn" style={{ position: "static", width: 28, height: 28, flexShrink: 0 }}
-                  title="Clear manual sentence edit" onClick={() => setManualEdits({...manualEdits, localSentence: ""})}>✕</button>
+                <button
+                  className="del-btn"
+                  style={{ position: "static", width: 28, height: 28, flexShrink: 0 }}
+                  title="Clear manual sentence edit"
+                  onClick={() => setManualEdits(prev => ({ ...prev, localSentence: "" }))}
+                >✕</button>
                 <button
                   className="send-btn"
-                  disabled={!manualEdits.localSentence.trim() && !manualEdits.localWord.trim() && !appState.currentSentence.trim() && !appState.currentWord.trim()}
+                  disabled={
+                    !manualEdits.localSentence.trim() &&
+                    !manualEdits.localWord.trim() &&
+                    !appState.currentSentence.trim() &&
+                    !appState.currentWord.trim()
+                  }
                   onClick={sendToChatHandler}
                 >
                   Send to Chat →
@@ -595,12 +664,18 @@ export default function TranslatorPage() {
               Conversation Log
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-              <span className="chat-count">{appState.chatMessages.length} MSG{appState.chatMessages.length !== 1 ? "S" : ""}</span>
+              <span className="chat-count">
+                {appState.chatMessages.length} MSG{appState.chatMessages.length !== 1 ? "S" : ""}
+              </span>
 
               <select
                 value={appState.targetLanguage}
                 onChange={(e) => updateAppState({ targetLanguage: e.target.value })}
-                style={{ background: "#071025", color: "#fff", border: "1px solid rgba(255,255,255,0.06)", padding: "6px 8px", borderRadius: 6 }}
+                style={{
+                  background: "#071025", color: "#fff",
+                  border: "1px solid rgba(255,255,255,0.06)",
+                  padding: "6px 8px", borderRadius: 6,
+                }}
                 title="Select target language"
               >
                 {LANGUAGES.map((l) => (
@@ -608,8 +683,11 @@ export default function TranslatorPage() {
                 ))}
               </select>
 
-              {appState.chatMessages.length > 0 &&
-                <button className="clear-chat-btn" onClick={() => updateAppState({ chatMessages: [] })}>CLEAR</button>}
+              {appState.chatMessages.length > 0 && (
+                <button className="clear-chat-btn" onClick={() => updateAppState({ chatMessages: [] })}>
+                  CLEAR
+                </button>
+              )}
             </div>
           </div>
 
@@ -625,6 +703,12 @@ export default function TranslatorPage() {
               <div className="chat-messages">
                 {appState.chatMessages.map((msg) => (
                   <div key={msg.id} className="chat-bubble">
+                    {/* FIX: show original English text above translation */}
+                    {msg.original && msg.lang !== "english" && (
+                      <div style={{ fontSize: 11, color: "rgba(255,255,255,0.35)", marginBottom: 4 }}>
+                        {msg.original}
+                      </div>
+                    )}
                     <div className="chat-bubble-inner">{msg.text}</div>
                     <div className="chat-meta">
                       <span className="chat-time">{msg.time}</span>
@@ -639,8 +723,9 @@ export default function TranslatorPage() {
 
           <div className="chat-footer">
             <div className="chat-hint">
-              <strong>How it works:</strong> Sign letters one by one. Hold a sign for ~1 sec to lock it.
-              Show a blank/open hand to commit the word to the sentence. Hit <strong>Send to Chat</strong> when ready.
+              <strong>How it works:</strong> Sign letters one by one. Hold a sign for ~3 sec to lock it.
+              Show a blank/open hand to commit the word. Use <strong>Add Word ↓</strong> to build the sentence.
+              Pick a language, then hit <strong>Send to Chat</strong>.
             </div>
           </div>
         </div>
